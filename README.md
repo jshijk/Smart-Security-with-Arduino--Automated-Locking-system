@@ -50,7 +50,9 @@ How to Run the System
 -MFRC522
 
 3.) Upload the code to the Arduino using the Arduino IDE.
+
 4.) Power the system using USB or an external power supply.
+
 5.) Place an RFID card near the reader to test access.
 
 Possible Results When Running
