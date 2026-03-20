@@ -6,7 +6,7 @@
 #define RST_PIN 9
 
 // ===== YOUR CARD UID =====
-String authorizedUID = "37 21 25 25";  // Change this to your card's UID
+String authorizedUID = "37 21 35 25";  // Change this to your card's UID
 
 // ===== TIMING PATTERN =====
 const int pattern[] = {300, 800, 300};  // Short-Long-Short pattern (in milliseconds)
