@@ -19,7 +19,6 @@ const int BUZZER_PIN = 6;     // Buzzer pin (change if needed)
 
 // ===== BUZZER SETTINGS =====
 const int BUZZER_FREQUENCY = 1000;  // 1kHz tone (adjust for your buzzer)
-const int OPEN_BUZZ_DURATION = 3000;  // Buzzer stays on while door open
 const int SUCCESS_BEEP_COUNT = 2;     // Number of success confirmation beeps
 const int ERROR_BEEP_COUNT = 3;       // Number of error beeps
 
@@ -29,6 +28,7 @@ int patternPosition = 0;
 bool patternStarted = false;
 unsigned long sessionStartTime = 0;
 const unsigned long SESSION_TIMEOUT = 5000;
+bool doorUnlocked = false;  // NEW: Track door state
 
 // LCD and RFID objects
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -67,13 +67,13 @@ void setup() {
 }
 
 void loop() {
-  // Check for pattern timeout
-  if (patternStarted) {
+  // Check for pattern timeout (only if door is locked and pattern in progress)
+  if (patternStarted && !doorUnlocked) {
     checkTimeout();
   }
   
   // Display main screen
-  if (!patternStarted) {
+  if (!patternStarted && !doorUnlocked) {
     displayMainScreen();
   }
   
@@ -101,7 +101,14 @@ void loop() {
     return;
   }
   
-  // Valid card - handle pattern
+  // If door is already unlocked, lock it (toggle off)
+  if (doorUnlocked) {
+    lockDoor();
+    rfid.PICC_HaltA();
+    return;
+  }
+  
+  // Valid card and door is locked - handle pattern
   handlePattern();
   
   rfid.PICC_HaltA();
@@ -230,7 +237,7 @@ void handlePattern() {
     
     // Check if pattern complete
     if (patternPosition >= patternLength) {
-      grantAccess();
+      unlockDoor();  // Changed from grantAccess to unlockDoor
       resetPattern();
     }
   } else {
@@ -270,39 +277,45 @@ void checkTimeout() {
   }
 }
 
-void grantAccess() {
+// NEW FUNCTION: Unlock door and keep it unlocked
+void unlockDoor() {
   // Play success chime
   successChime();
   
   // Unlock the door
   digitalWrite(RELAY_PIN, HIGH);
-  
-  // Start door open buzzer (continuous)
-  doorOpenBuzzer();
+  doorUnlocked = true;  // Set state to unlocked
   
   // Show success message
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("ACCESS GRANTED!");
   lcd.setCursor(0, 1);
-  lcd.print("Door unlocked");
+  lcd.print("Scan to lock");
   
   Serial.println("*** ACCESS GRANTED - DOOR UNLOCKED ***");
-  
-  // Keep door unlocked for 3 seconds with buzzer on
-  delay(OPEN_BUZZ_DURATION);
-  
-  // Lock the door and stop buzzer
+  Serial.println("*** SCAN CARD AGAIN TO LOCK ***");
+}
+
+// NEW FUNCTION: Lock the door
+void lockDoor() {
+  // Lock the door
   digitalWrite(RELAY_PIN, LOW);
-  doorCloseBuzzer();
+  doorUnlocked = false;  // Set state to locked
   
-  // Quick beep to confirm door locked
-  beep(100);
+  // Play lock confirmation beep
+  beep(200);
   
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Door locked");
-  delay(1000);
+  lcd.print("DOOR LOCKED");
+  lcd.setCursor(0, 1);
+  lcd.print("Goodbye!");
+  
+  Serial.println("*** DOOR LOCKED ***");
+  
+  delay(1500);
+  lcd.clear();
 }
 
 void handleWrongCard() {
