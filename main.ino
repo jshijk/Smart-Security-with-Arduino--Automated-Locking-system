@@ -9,17 +9,16 @@
 String authorizedUID = "37 21 25 25";  // Change this to your card's UID
 
 // ===== TIMING PATTERN =====
-const int pattern[] = {300, 800, 300};  // Short-Long-Short pattern
+const int pattern[] = {300, 800, 300};  // Short-Long-Short pattern (in milliseconds)
 const int patternLength = 3;
 const int TOLERANCE = 150;  // Timing error allowance
 
 // ===== HARDWARE PINS =====
 const int RELAY_PIN = 7;     // Door lock relay
-const int BUZZER_PIN = 6;     // Buzzer pin (change if needed)
+const int BUZZER_PIN = 6;     // Buzzer pin
 
 // ===== BUZZER SETTINGS =====
-const int BUZZER_FREQUENCY = 1000;  // 1kHz tone (adjust for your buzzer)
-const int SUCCESS_BEEP_COUNT = 2;     // Number of success confirmation beeps
+const int BUZZER_FREQUENCY = 1000;  // 1kHz tone
 const int ERROR_BEEP_COUNT = 3;       // Number of error beeps
 
 // ===== SYSTEM VARIABLES =====
@@ -28,7 +27,7 @@ int patternPosition = 0;
 bool patternStarted = false;
 unsigned long sessionStartTime = 0;
 const unsigned long SESSION_TIMEOUT = 5000;
-bool doorUnlocked = false;  // NEW: Track door state
+bool doorUnlocked = false;
 
 // LCD and RFID objects
 LiquidCrystal_I2C lcd(0x27, 16, 2);
@@ -51,13 +50,12 @@ void setup() {
   SPI.begin();
   rfid.PCD_Init();
   
-  // Welcome message with buzzer test
+  // Welcome message
   lcd.setCursor(0, 0);
   lcd.print("Secure Door Lock");
   lcd.setCursor(0, 1);
   lcd.print("Pattern: S-L-S");
   
-  // Test buzzer
   testBuzzer();
   
   delay(2000);
@@ -72,10 +70,8 @@ void loop() {
     checkTimeout();
   }
   
-  // Display main screen
-  if (!patternStarted && !doorUnlocked) {
-    displayMainScreen();
-  }
+  // Display status screen
+  updateDisplay();
   
   // Check for new card
   if ( !rfid.PICC_IsNewCardPresent() ) {
@@ -92,7 +88,7 @@ void loop() {
   Serial.println(cardID);
   
   // Short beep to acknowledge card read
-  beep(100);  // Quick 100ms beep
+  beep(100);
   
   // Check if card is authorized
   if (cardID != authorizedUID) {
@@ -117,32 +113,28 @@ void loop() {
 // ===== BUZZER FUNCTIONS =====
 
 void beep(int duration) {
-  // Simple beep for specified milliseconds
   tone(BUZZER_PIN, BUZZER_FREQUENCY);
   delay(duration);
   noTone(BUZZER_PIN);
 }
 
 void beepPattern(int count, int beepDuration, int pauseDuration) {
-  // Beep multiple times with pauses in between
   for (int i = 0; i < count; i++) {
     tone(BUZZER_PIN, BUZZER_FREQUENCY);
     delay(beepDuration);
     noTone(BUZZER_PIN);
     
-    if (i < count - 1) {  // Don't pause after last beep
+    if (i < count - 1) {
       delay(pauseDuration);
     }
   }
 }
 
 void testBuzzer() {
-  // Quick test sequence on startup
-  beepPattern(2, 200, 100);  // Two short beeps
+  beepPattern(2, 200, 100);
 }
 
 void successChime() {
-  // Happy ascending tone pattern
   tone(BUZZER_PIN, 523);  // C5
   delay(150);
   tone(BUZZER_PIN, 659);  // E5
@@ -153,36 +145,54 @@ void successChime() {
 }
 
 void errorSound() {
-  // Error sound - low beeps
   beepPattern(ERROR_BEEP_COUNT, 200, 150);
 }
 
-void doorOpenBuzzer() {
-  // Buzzer stays on while door is open
-  tone(BUZZER_PIN, BUZZER_FREQUENCY);
-}
+// ===== DISPLAY FUNCTIONS =====
 
-void doorCloseBuzzer() {
-  noTone(BUZZER_PIN);
+void updateDisplay() {
+  if (doorUnlocked) {
+    // Door is unlocked - show lock prompt
+    lcd.setCursor(0, 0);
+    lcd.print("DOOR UNLOCKED   ");
+    lcd.setCursor(0, 1);
+    lcd.print("Scan to LOCK    ");
+  } else if (!patternStarted) {
+    // Waiting for first scan
+    lcd.setCursor(0, 0);
+    lcd.print("Scan ID 1/" + String(patternLength) + "    ");
+    lcd.setCursor(0, 1);
+    lcd.print("Pattern: ");
+    for (int i = 0; i < patternLength; i++) {
+      if (pattern[i] < 500) {
+        lcd.print("S ");
+      } else {
+        lcd.print("L ");
+      }
+    }
+    lcd.print("   "); // Clear remaining chars
+  } else {
+    // Pattern in progress - show countdown
+    lcd.setCursor(0, 0);
+    lcd.print("Scan ID ");
+    lcd.print(patternPosition + 1);
+    lcd.print("/");
+    lcd.print(patternLength);
+    lcd.print("    "); // Clear remaining chars
+    
+    lcd.setCursor(0, 1);
+    // Show which timing is expected next
+    lcd.print("Wait ");
+    if (pattern[patternPosition - 1] < 500) {
+      lcd.print("SHORT ");
+    } else {
+      lcd.print("LONG  ");
+    }
+    lcd.print("ms    "); // Clear remaining chars
+  }
 }
 
 // ===== MAIN FUNCTIONS =====
-
-void displayMainScreen() {
-  lcd.setCursor(0, 0);
-  lcd.print("Scan your card  ");
-  lcd.setCursor(0, 1);
-  
-  // Show pattern hint
-  lcd.print("Pattern: ");
-  for (int i = 0; i < patternLength; i++) {
-    if (pattern[i] < 500) {
-      lcd.print("S ");  // S for Short
-    } else {
-      lcd.print("L ");  // L for Long
-    }
-  }
-}
 
 void handlePattern() {
   unsigned long now = millis();
@@ -194,14 +204,20 @@ void handlePattern() {
     lastScanTime = now;
     sessionStartTime = now;
     
+    // Immediate feedback
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Pattern started");
+    lcd.print("Scan ID 1/" + String(patternLength));
     lcd.setCursor(0, 1);
-    lcd.print("Scan 1/");
-    lcd.print(patternLength);
+    lcd.print("Next: ");
+    if (pattern[0] < 500) {
+      lcd.print("SHORT delay");
+    } else {
+      lcd.print("LONG delay");
+    }
     
-    Serial.println("Pattern started - Scan 1");
+    Serial.println("Pattern started - 1/" + String(patternLength));
+    delay(500); // Brief pause to show the message
     return;
   }
   
@@ -219,36 +235,53 @@ void handlePattern() {
     lastScanTime = now;
     
     // Short happy beep for correct timing
-    beep(80);  // Quick confirmation beep
+    beep(80);
     
+    // Show progress
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Good timing!");
-    lcd.setCursor(0, 1);
-    lcd.print("Scan ");
+    lcd.print("GOOD! ");
     lcd.print(patternPosition);
     lcd.print("/");
     lcd.print(patternLength);
     
-    Serial.print("Correct timing. Scan ");
+    Serial.print("Correct timing. Progress: ");
     Serial.print(patternPosition);
     Serial.print("/");
     Serial.println(patternLength);
     
     // Check if pattern complete
     if (patternPosition >= patternLength) {
-      unlockDoor();  // Changed from grantAccess to unlockDoor
+      lcd.setCursor(0, 1);
+      lcd.print("UNLOCKING...    ");
+      delay(500);
+      unlockDoor();
       resetPattern();
+    } else {
+      // Show what's next
+      lcd.setCursor(0, 1);
+      lcd.print("Next: ");
+      if (pattern[patternPosition - 1] < 500) {
+        lcd.print("SHORT");
+      } else {
+        lcd.print("LONG ");
+      }
+      delay(300);
     }
   } else {
     // Wrong timing - pattern fails
-    errorSound();  // Play error sound
+    errorSound();
     
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Wrong timing!");
+    lcd.print("WRONG TIMING!   ");
     lcd.setCursor(0, 1);
-    lcd.print("Start over");
+    lcd.print("Expected: ");
+    if (expectedDelay < 500) {
+      lcd.print("SHORT");
+    } else {
+      lcd.print("LONG ");
+    }
     
     Serial.print("Wrong timing. Expected ~");
     Serial.print(expectedDelay);
@@ -262,55 +295,46 @@ void handlePattern() {
 
 void checkTimeout() {
   if (millis() - lastScanTime > SESSION_TIMEOUT) {
-    // Pattern timeout - play warning sound
-    beep(500);  // Long single beep
+    beep(500);
     
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Session timeout");
+    lcd.print("TIMEOUT!        ");
     lcd.setCursor(0, 1);
-    lcd.print("Try again");
+    lcd.print("Start over 1/" + String(patternLength));
     
-    Serial.println("Session timeout - no card scanned");
+    Serial.println("Session timeout - pattern reset");
     delay(1500);
     resetPattern();
   }
 }
 
-// NEW FUNCTION: Unlock door and keep it unlocked
 void unlockDoor() {
-  // Play success chime
   successChime();
   
-  // Unlock the door
   digitalWrite(RELAY_PIN, HIGH);
-  doorUnlocked = true;  // Set state to unlocked
+  doorUnlocked = true;
   
-  // Show success message
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("ACCESS GRANTED!");
+  lcd.print("ACCESS GRANTED! ");
   lcd.setCursor(0, 1);
-  lcd.print("Scan to lock");
+  lcd.print("Scan ID to LOCK ");
   
-  Serial.println("*** ACCESS GRANTED - DOOR UNLOCKED ***");
-  Serial.println("*** SCAN CARD AGAIN TO LOCK ***");
+  Serial.println("*** DOOR UNLOCKED - SCAN TO LOCK ***");
 }
 
-// NEW FUNCTION: Lock the door
 void lockDoor() {
-  // Lock the door
   digitalWrite(RELAY_PIN, LOW);
-  doorUnlocked = false;  // Set state to locked
+  doorUnlocked = false;
   
-  // Play lock confirmation beep
   beep(200);
   
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("DOOR LOCKED");
+  lcd.print("DOOR LOCKED     ");
   lcd.setCursor(0, 1);
-  lcd.print("Goodbye!");
+  lcd.print("Goodbye!        ");
   
   Serial.println("*** DOOR LOCKED ***");
   
@@ -319,19 +343,17 @@ void lockDoor() {
 }
 
 void handleWrongCard() {
-  // Play error sound
   errorSound();
   
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("UNAUTHORIZED");
+  lcd.print("UNAUTHORIZED    ");
   lcd.setCursor(0, 1);
-  lcd.print("Card not valid");
+  lcd.print("Invalid Card    ");
   
-  Serial.println("WARNING: Unauthorized card detected!");
+  Serial.println("WARNING: Unauthorized card!");
   delay(2000);
   
-  // If pattern was in progress, reset it
   if (patternStarted) {
     resetPattern();
   }
