@@ -6,313 +6,324 @@
 #define RST_PIN 9
 
 // ===== YOUR CARD UID =====
-String authorizedUID = "37 21 35 25";  // Change this to your card's UID
-
-// ===== TIMING PATTERN =====
-const int pattern[] = {300, 800, 300};  // Short-Long-Short pattern (in milliseconds)
-const int patternLength = 3;
-const int TOLERANCE = 150;  // Timing error allowance
+String authorizedUID = "37 21 35 25";
 
 // ===== HARDWARE PINS =====
-const int RELAY_PIN = 7;     // Door lock relay
+const int RELAY_PIN = 7;
+
+// ===== SWIPE SETTINGS =====
+const unsigned long SWIPE_TIMEOUT = 1500;      // Max time for full swipe
+const unsigned long DETECTION_WINDOW = 50;       // Check every 50ms
+const int MIN_SWIPE_POINTS = 3;                // Need at least 3 readings
+const int DIRECTION_THRESHOLD = 30;              // % difference to determine direction
+
+// ===== UNLOCK PATTERN =====
+// 0 = Left, 1 = Right, 2 = Up, 3 = Down
+const int unlockPattern[] = {1, 3};      // Right → Down = UNLOCK
+const int lockPattern[] = {0, 2};        // Left → Up = LOCK
+const int patternLength = 2;
 
 // ===== SYSTEM VARIABLES =====
-unsigned long lastScanTime = 0;
-int patternPosition = 0;
-bool patternStarted = false;
-bool waitingForRemoval = false;  // NEW: Track if we need card removed
-unsigned long cardRemovedTime = 0;
-const unsigned long REMOVAL_TIMEOUT = 2000;  // Max time to remove card
-const unsigned long SESSION_TIMEOUT = 5000;
 bool doorUnlocked = false;
+bool swipeInProgress = false;
+unsigned long swipeStartTime = 0;
+unsigned long lastDetectionTime = 0;
 
-// LCD and RFID objects
+// Swipe detection variables
+int readCount = 0;
+unsigned long firstReadTime = 0;
+unsigned long lastReadTime = 0;
+bool cardWasPresent = false;
+
+// For simple "swipe" detection using multiple quick reads
+int consecutiveReads = 0;
+unsigned long firstConsecutiveTime = 0;
+
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 MFRC522 rfid(SS_PIN, RST_PIN);
 
 void setup() {
   Serial.begin(9600);
   
-  // Setup pins
   pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);  // Door starts locked
+  digitalWrite(RELAY_PIN, LOW);
   
-  // Initialize LCD
   lcd.init();
   lcd.backlight();
-  
-  // Initialize RFID
   SPI.begin();
   rfid.PCD_Init();
   
-  // Welcome message
+  // Welcome
   lcd.setCursor(0, 0);
-  lcd.print("Secure Door Lock");
+  lcd.print("Swipe Direction");
   lcd.setCursor(0, 1);
-  lcd.print("Pattern: S-L-S");
-  
-  delay(2000);
+  lcd.print("Lock System");
+  delay(2500);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Right-Down=OPEN");
+  lcd.setCursor(0, 1);
+  lcd.print("Left-Up=LOCK");
+  delay(2500);
   lcd.clear();
   
-  Serial.println("System Ready - Waiting for cards...");
+  Serial.println("Ready - Swipe patterns:");
+  Serial.println("  RIGHT then DOWN = UNLOCK");
+  Serial.println("  LEFT then UP = LOCK");
 }
 
 void loop() {
-  // Check for timeouts
-  if (patternStarted && !doorUnlocked) {
-    checkTimeout();
-  }
-  
-  // Check if card is still present (for removal detection)
-  bool cardPresent = rfid.PICC_IsNewCardPresent() || checkCardStillThere();
-  
-  // Handle removal detection
-  if (waitingForRemoval && !cardPresent) {
-    // Card was removed!
-    handleCardRemoved();
-    return;
-  }
-  
-  // Update display based on state
   updateDisplay();
   
-  // If waiting for removal, don't accept new scans yet
-  if (waitingForRemoval) {
-    return;
-  }
+  // Check for card presence
+  bool cardPresent = rfid.PICC_IsNewCardPresent();
   
-  // Check for new card scan
-  if (!rfid.PICC_IsNewCardPresent()) {
-    return;
-  }
-  if (!rfid.PICC_ReadCardSerial()) {
-    return;
-  }
-  
-  // Get the card UID
-  String cardID = getCardID();
-  Serial.print("Card detected: ");
-  Serial.println(cardID);
-  
-  // Check if card is authorized
-  if (cardID != authorizedUID) {
-    handleWrongCard();
-    rfid.PICC_HaltA();
-    return;
-  }
-  
-  // If door is already unlocked, lock it (toggle off)
-  if (doorUnlocked) {
-    lockDoor();
-    rfid.PICC_HaltA();
-    return;
-  }
-  
-  // Valid card and door is locked - handle pattern
-  handlePattern();
-  
-  rfid.PICC_HaltA();
-}
-
-// Check if same card is still on reader (without re-reading)
-bool checkCardStillThere() {
-  // Try to re-select the card without full read
-  byte bufferATQA[2];
-  byte bufferSize = sizeof(bufferATQA);
-  
-  // Check if card is still present using WUPA command
-  MFRC522::StatusCode result = rfid.PICC_WakeupA(bufferATQA, &bufferSize);
-  
-  if (result == MFRC522::STATUS_OK) {
-    rfid.PICC_HaltA();  // Put it back to halt state
-    return true;
-  }
-  return false;
-}
-
-// ===== DISPLAY FUNCTIONS =====
-
-void updateDisplay() {
-  if (doorUnlocked) {
-    lcd.setCursor(0, 0);
-    lcd.print("DOOR UNLOCKED   ");
-    lcd.setCursor(0, 1);
-    lcd.print("Scan to LOCK    ");
-  } else if (!patternStarted) {
-    // Initial state - waiting for first scan
-    lcd.setCursor(0, 0);
-    lcd.print("Please scan the ");
-    lcd.setCursor(0, 1);
-    lcd.print("card to start   ");
-  } else if (waitingForRemoval) {
-    // Waiting for user to remove card
-    lcd.setCursor(0, 0);
-    lcd.print("Please remove   ");
-    lcd.setCursor(0, 1);
-    lcd.print("the ID          ");
-  } else {
-    // Waiting for next scan
-    lcd.setCursor(0, 0);
-    lcd.print("Scan ");
-    lcd.print(patternPosition + 1);
-    lcd.print("/");
-    lcd.print(patternLength);
-    lcd.print("        ");
-    lcd.setCursor(0, 1);
-    lcd.print("Please scan card");
-  }
-}
-
-// ===== MAIN FUNCTIONS =====
-
-void handlePattern() {
-  unsigned long now = millis();
-  
-  if (!patternStarted) {
-    // First scan - start new pattern
-    patternStarted = true;
-    patternPosition = 1;
-    lastScanTime = now;
-    waitingForRemoval = true;  // Now wait for removal
-    
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Scan 1/");
-    lcd.print(patternLength);
-    lcd.print(" done!   ");
-    lcd.setCursor(0, 1);
-    lcd.print("Remove card...  ");
-    
-    Serial.println("Scan 1/" + String(patternLength) + " - Waiting for removal");
-    return;
-  }
-  
-  // Calculate time since last scan (when card was removed)
-  unsigned long timeDiff = now - cardRemovedTime;
-  int expectedDelay = pattern[patternPosition - 1];
-  
-  // Check if timing matches
-  bool timingMatch = (timeDiff > expectedDelay - TOLERANCE && 
-                      timeDiff < expectedDelay + TOLERANCE);
-  
-  if (timingMatch) {
-    // Correct timing!
-    patternPosition++;
-    
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("GOOD! ");
-    lcd.print(patternPosition);
-    lcd.print("/");
-    lcd.print(patternLength);
-    lcd.print("       ");
-    
-    Serial.print("Correct timing. Progress: ");
-    Serial.print(patternPosition);
-    Serial.print("/");
-    Serial.println(patternLength);
-    
-    // Check if pattern complete
-    if (patternPosition >= patternLength) {
-      lcd.setCursor(0, 1);
-      lcd.print("UNLOCKING...    ");
-      delay(500);
-      unlockDoor();
-      resetPattern();
-    } else {
-      // Need to remove card again
-      waitingForRemoval = true;
-      lcd.setCursor(0, 1);
-      lcd.print("Remove card...  ");
+  if (cardPresent) {
+    if (!rfid.PICC_ReadCardSerial()) {
+      return;
     }
+    
+    String cardID = getCardID();
+    
+    // Check authorization
+    if (cardID != authorizedUID) {
+      handleWrongCard();
+      rfid.PICC_HaltA();
+      return;
+    }
+    
+    // Valid card detected
+    handleCardDetection();
+    rfid.PICC_HaltA();
   } else {
-    // Wrong timing - pattern fails
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("WRONG TIMING!   ");
-    lcd.setCursor(0, 1);
-    lcd.print("Expected: ");
-    lcd.print(expectedDelay);
-    lcd.print("ms ");
-    
-    Serial.print("Wrong timing. Expected ~");
-    Serial.print(expectedDelay);
-    Serial.print("ms, got ");
-    Serial.println(timeDiff);
-    
-    delay(2000);
-    resetPattern();
+    // No card present
+    if (cardWasPresent && swipeInProgress) {
+      // Card was removed - end of swipe
+      endSwipe();
+    }
+    cardWasPresent = false;
   }
 }
 
-void handleCardRemoved() {
+void handleCardDetection() {
   unsigned long now = millis();
-  cardRemovedTime = now;
-  waitingForRemoval = false;
   
-  // If this was the first scan, just record the time and wait for next scan
-  if (patternPosition == 1 && lastScanTime == 0) {
-    lastScanTime = now;  // Actually this shouldn't happen, but safety check
+  if (!swipeInProgress) {
+    // Start new swipe
+    startSwipe();
+  } else {
+    // Continue swipe - check timing
+    if (now - swipeStartTime > SWIPE_TIMEOUT) {
+      // Swipe took too long
+      swipeTimeout();
+      return;
+    }
+    
+    // Count this as part of swipe
+    consecutiveReads++;
+    lastReadTime = now;
+    
+    // Visual feedback during swipe
+    if (consecutiveReads == 1) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Swipe detected...");
+    }
   }
   
-  lastScanTime = now;  // Update to removal time for next interval calculation
+  cardWasPresent = true;
+}
+
+void startSwipe() {
+  swipeInProgress = true;
+  swipeStartTime = millis();
+  firstReadTime = millis();
+  lastReadTime = millis();
+  consecutiveReads = 1;
+  firstConsecutiveTime = millis();
   
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Card removed!   ");
+  lcd.print("Reading swipe...");
   lcd.setCursor(0, 1);
+  lcd.print("Keep moving!");
   
-  if (patternPosition >= patternLength) {
-    lcd.print("Done!           ");
-  } else {
-    lcd.print("Wait for scan ");
-    lcd.print(patternPosition + 1);
-  }
-  
-  Serial.print("Card removed at position ");
-  Serial.print(patternPosition);
-  Serial.print("/");
-  Serial.println(patternLength);
-  
-  delay(200);  // Brief debounce
+  Serial.println("Swipe started");
 }
 
-void checkTimeout() {
-  unsigned long now = millis();
+void endSwipe() {
+  unsigned long swipeDuration = lastReadTime - firstReadTime;
   
-  // Check removal timeout
-  if (waitingForRemoval && (now - lastScanTime > REMOVAL_TIMEOUT)) {
+  Serial.print("Swipe ended. Duration: ");
+  Serial.print(swipeDuration);
+  Serial.print("ms, Reads: ");
+  Serial.println(consecutiveReads);
+  
+  // Determine swipe direction based on timing characteristics
+  int direction = analyzeSwipe(swipeDuration, consecutiveReads);
+  
+  if (direction >= 0) {
+    handleDirection(direction);
+  } else {
+    // Could not determine direction
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("Remove card!    ");
+    lcd.print("Swipe unclear!");
     lcd.setCursor(0, 1);
-    lcd.print("Timeout soon... ");
-    
-    if (now - lastScanTime > SESSION_TIMEOUT) {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("TIMEOUT!        ");
-      lcd.setCursor(0, 1);
-      lcd.print("Start over      ");
-      
-      Serial.println("Session timeout - pattern reset");
-      delay(1500);
-      resetPattern();
-    }
-    return;
+    lcd.print("Try again");
+    delay(1500);
   }
   
-  // Check session timeout between scans
-  if (!waitingForRemoval && patternStarted && (now - lastScanTime > SESSION_TIMEOUT)) {
+  resetSwipe();
+}
+
+int analyzeSwipe(unsigned long duration, int reads) {
+  // Simple heuristic: fast reads = quick swipe
+  // We use duration and read density to guess direction
+  // In reality, RFID can't detect true spatial direction
+  // So we simulate with timing patterns:
+  
+  // Short quick swipe = LEFT (fast removal)
+  // Longer steady swipe = RIGHT (slow pass)
+  // Medium with pause = UP or DOWN (lift and return)
+  
+  if (reads < MIN_SWIPE_POINTS) {
+    return -1; // Too few readings
+  }
+  
+  unsigned long avgInterval = duration / (reads - 1);
+  
+  Serial.print("Avg interval: ");
+  Serial.println(avgInterval);
+  
+  // Simulate direction based on speed pattern
+  // This is a "fake" direction for demo - in real hardware you'd need
+  // multiple antennas or accelerometer on card
+  
+  // For this implementation, we use timing as "direction":
+  // Very fast (<100ms total) = LEFT (0)
+  // Fast (100-300ms) = RIGHT (1)  
+  // Medium (300-600ms) = UP (2)
+  // Slow (>600ms) = DOWN (3)
+  
+  if (duration < 150) {
+    Serial.println("Detected: LEFT (fast)");
+    return 0; // Left
+  } else if (duration < 350) {
+    Serial.println("Detected: RIGHT (medium)");
+    return 1; // Right
+  } else if (duration < 700) {
+    Serial.println("Detected: UP (steady)");
+    return 2; // Up
+  } else {
+    Serial.println("Detected: DOWN (slow)");
+    return 3; // Down
+  }
+}
+
+void handleDirection(int direction) {
+  static int patternBuffer[2];
+  static int bufferIndex = 0;
+  static unsigned long lastDirectionTime = 0;
+  unsigned long now = millis();
+  
+  // Reset buffer if too much time passed
+  if (now - lastDirectionTime > 2000) {
+    bufferIndex = 0;
+  }
+  
+  // Store direction
+  patternBuffer[bufferIndex] = direction;
+  bufferIndex++;
+  lastDirectionTime = now;
+  
+  // Show what was detected
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Dir: ");
+  lcd.print(directionToString(direction));
+  lcd.setCursor(0, 1);
+  
+  if (bufferIndex == 1) {
+    lcd.print("First swipe OK");
+    delay(800);
     lcd.clear();
     lcd.setCursor(0, 0);
-    lcd.print("TIMEOUT!        ");
+    lcd.print("Swipe second...");
     lcd.setCursor(0, 1);
-    lcd.print("Too slow!       ");
+    if (doorUnlocked) {
+      lcd.print("Need: Left-Up");
+    } else {
+      lcd.print("Need: Right-Down");
+    }
+  } else if (bufferIndex >= 2) {
+    // Check pattern
+    lcd.print("Checking...");
+    delay(500);
     
-    Serial.println("Session timeout - pattern reset");
-    delay(1500);
-    resetPattern();
+    bool isUnlock = (patternBuffer[0] == unlockPattern[0] && 
+                     patternBuffer[1] == unlockPattern[1]);
+    bool isLock = (patternBuffer[0] == lockPattern[0] && 
+                   patternBuffer[1] == lockPattern[1]);
+    
+    bufferIndex = 0; // Reset
+    
+    if (!doorUnlocked && isUnlock) {
+      unlockDoor();
+    } else if (doorUnlocked && isLock) {
+      lockDoor();
+    } else {
+      // Wrong pattern
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Wrong pattern!");
+      lcd.setCursor(0, 1);
+      lcd.print("Try again");
+      delay(1500);
+    }
+  }
+}
+
+String directionToString(int dir) {
+  switch(dir) {
+    case 0: return "LEFT ";
+    case 1: return "RIGHT";
+    case 2: return "UP   ";
+    case 3: return "DOWN ";
+    default: return "???  ";
+  }
+}
+
+void swipeTimeout() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Too slow!");
+  lcd.setCursor(0, 1);
+  lcd.print("Swipe faster");
+  delay(1500);
+  resetSwipe();
+}
+
+void resetSwipe() {
+  swipeInProgress = false;
+  consecutiveReads = 0;
+  cardWasPresent = false;
+  lcd.clear();
+}
+
+void updateDisplay() {
+  if (swipeInProgress) return;
+  
+  if (doorUnlocked) {
+    lcd.setCursor(0, 0);
+    lcd.print("UNLOCKED        ");
+    lcd.setCursor(0, 1);
+    lcd.print("Swipe Left-Up   ");
+  } else {
+    lcd.setCursor(0, 0);
+    lcd.print("LOCKED          ");
+    lcd.setCursor(0, 1);
+    lcd.print("Swipe Right-Down");
   }
 }
 
@@ -324,9 +335,11 @@ void unlockDoor() {
   lcd.setCursor(0, 0);
   lcd.print("ACCESS GRANTED! ");
   lcd.setCursor(0, 1);
-  lcd.print("Scan to LOCK    ");
+  lcd.print("Door OPEN       ");
+  delay(2000);
+  lcd.clear();
   
-  Serial.println("*** DOOR UNLOCKED - SCAN TO LOCK ***");
+  Serial.println("*** DOOR UNLOCKED ***");
 }
 
 void lockDoor() {
@@ -335,50 +348,31 @@ void lockDoor() {
   
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("DOOR LOCKED     ");
+  lcd.print("LOCKED!         ");
   lcd.setCursor(0, 1);
-  lcd.print("Goodbye!        ");
-  
-  Serial.println("*** DOOR LOCKED ***");
-  
+  lcd.print("Goodbye         ");
   delay(1500);
   lcd.clear();
+  
+  Serial.println("*** DOOR LOCKED ***");
 }
 
 void handleWrongCard() {
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("UNAUTHORIZED    ");
+  lcd.print("WRONG CARD      ");
   lcd.setCursor(0, 1);
-  lcd.print("Invalid Card    ");
-  
-  Serial.println("WARNING: Unauthorized card!");
+  lcd.print("Access Denied   ");
   delay(2000);
-  
-  if (patternStarted) {
-    resetPattern();
-  }
-}
-
-void resetPattern() {
-  patternStarted = false;
-  patternPosition = 0;
-  lastScanTime = 0;
-  waitingForRemoval = false;
-  cardRemovedTime = 0;
   lcd.clear();
 }
 
 String getCardID() {
   String ID = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
-    if (rfid.uid.uidByte[i] < 0x10) {
-      ID.concat("0");
-    }
+    if (rfid.uid.uidByte[i] < 0x10) ID.concat("0");
     ID.concat(String(rfid.uid.uidByte[i], HEX));
-    if (i < rfid.uid.size - 1) {
-      ID.concat(" ");
-    }
+    if (i < rfid.uid.size - 1) ID.concat(" ");
   }
   ID.toUpperCase();
   return ID;
