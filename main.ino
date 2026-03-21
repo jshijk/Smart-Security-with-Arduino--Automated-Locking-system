@@ -13,7 +13,7 @@ const unsigned long SYMBOL_GAP = 1000;
 const unsigned long PATTERN_END = 1500;
 
 const int RELAY_PIN = 7;
-const int BUZZER_PIN = 6;  // Buzzer pin
+const int BUZZER_PIN = 6;
 
 bool doorUnlocked = false;
 bool readingPattern = false;
@@ -40,13 +40,12 @@ void setup() {
   SPI.begin();
   rfid.PCD_Init();
   
-  // Startup beep
   beep(200, 2);
   
   lcd.setCursor(0, 0);
-  lcd.print("Tap: ..-");
+  lcd.print("   SMART VAULT");
   lcd.setCursor(0, 1);
-  lcd.print("1tap=. 2tap=-");
+  lcd.print("    !WELCOME!");
   delay(3000);
   lcd.clear();
 }
@@ -60,7 +59,13 @@ void loop() {
       return;
     }
     rfid.PICC_HaltA();
-    handleTap();
+    
+    // KEY CHANGE: If unlocked, lock immediately. If locked, require pattern to unlock
+    if (doorUnlocked) {
+      lockDoor();
+    } else {
+      handleTap();
+    }
   } else {
     checkGaps();
   }
@@ -79,11 +84,10 @@ void handleTap() {
     lastTapTime = now;
     inSymbol = true;
     
-    // Short beep on first tap
     beep(100, 1);
     
     lcd.clear();
-    lcd.print("Tap 1...");
+    
     return;
   }
   
@@ -92,11 +96,10 @@ void handleTap() {
     tapCount = 1;
     lastTapTime = now;
     
-    // Short beep on new symbol
     beep(100, 1);
     
     lcd.setCursor(0, 0);
-    lcd.print("Tap 1...");
+   
     return;
   }
   
@@ -105,12 +108,9 @@ void handleTap() {
     lastTapTime = now;
     
     lcd.setCursor(0, 0);
-    lcd.print("Tap ");
-    lcd.print(tapCount);
-    lcd.print("...");
+   
     
     if (tapCount > 2) {
-      // Error beep for too many taps
       errorBeep();
       
       lcd.setCursor(0, 1);
@@ -135,20 +135,20 @@ void checkGaps() {
     if (tapCount == 1) {
       morseBuffer[symbolCount] = '.';
       lcd.setCursor(0, 1);
-      lcd.print("= DOT (.)       ");
+      
     } else if (tapCount == 2) {
       morseBuffer[symbolCount] = '-';
       lcd.setCursor(0, 1);
-      lcd.print("= DASH (-)      ");
+      
     }
     
     symbolCount++;
     morseBuffer[symbolCount] = '\0';
     
     lcd.setCursor(0, 0);
-    lcd.print("Code: ");
+    lcd.print("      ");
     lcd.print(morseBuffer);
-    lcd.print("        ");
+    lcd.print("     ");
     
     tapCount = 0;
   }
@@ -163,22 +163,16 @@ void checkPattern() {
   
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Got: ");
+  lcd.print("      ");
   lcd.print(morseBuffer);
   
   if (strcmp(morseBuffer, PATTERN) == 0) {
-    // Correct pattern - toggle lock
-    if (doorUnlocked) {
-      lockDoor();
-    } else {
-      unlockDoor();
-    }
+    unlockDoor();
   } else {
-    // Wrong pattern - error beep
     errorBeep();
     
     lcd.setCursor(0, 1);
-    lcd.print("Wrong! Use ..-");
+    lcd.print("    !Wrong! ");
     delay(2000);
   }
   
@@ -197,11 +191,10 @@ void unlockDoor() {
   digitalWrite(RELAY_PIN, HIGH);
   doorUnlocked = true;
   
-  // Success beep - door opening
   successBeep();
   
   lcd.setCursor(0, 1);
-  lcd.print("UNLOCKED!");
+  lcd.print("   !UNLOCKED! ");
   delay(2000);
 }
 
@@ -209,15 +202,12 @@ void lockDoor() {
   digitalWrite(RELAY_PIN, LOW);
   doorUnlocked = false;
   
-  // Lock beep - door closing
   lockBeep();
   
   lcd.setCursor(0, 1);
-  lcd.print("LOCKED!");
+  lcd.print("   LOCKED!");
   delay(1500);
 }
-
-// ===== BUZZER FUNCTIONS =====
 
 void beep(int duration, int count) {
   for (int i = 0; i < count; i++) {
@@ -229,30 +219,27 @@ void beep(int duration, int count) {
 }
 
 void successBeep() {
-  // Happy ascending tone for unlock
-  tone(BUZZER_PIN, 523);  // C5
+  tone(BUZZER_PIN, 523);
   delay(150);
-  tone(BUZZER_PIN, 659);  // E5
+  tone(BUZZER_PIN, 659);
   delay(150);
-  tone(BUZZER_PIN, 784);  // G5
+  tone(BUZZER_PIN, 784);
   delay(300);
   noTone(BUZZER_PIN);
 }
 
 void lockBeep() {
-  // Descending tone for lock
-  tone(BUZZER_PIN, 784);  // G5
+  tone(BUZZER_PIN, 784);
   delay(150);
-  tone(BUZZER_PIN, 659);  // E5
+  tone(BUZZER_PIN, 659);
   delay(150);
-  tone(BUZZER_PIN, 523);  // C5
+  tone(BUZZER_PIN, 523);
   delay(300);
   noTone(BUZZER_PIN);
 }
 
 void errorBeep() {
-  // Low error beep for wrong pattern
-  tone(BUZZER_PIN, 200);  // Low tone
+  tone(BUZZER_PIN, 200);
   delay(300);
   noTone(BUZZER_PIN);
   delay(100);
@@ -265,12 +252,16 @@ void updateDisplay() {
   if (readingPattern) return;
   
   lcd.setCursor(0, 0);
-  lcd.print("Use: ..-");
+  if (doorUnlocked) {
+    lcd.print("  Tap to Lock     ");
+  } else {
+    lcd.print("Scan valid Card ");
+  }
   lcd.setCursor(0, 1);
   if (doorUnlocked) {
-    lcd.print("UNLOCKED        ");
+    lcd.print("   !UNLOCKED!        ");
   } else {
-    lcd.print("LOCKED          ");
+    lcd.print("    !LOCKED!          ");
   }
 }
 
