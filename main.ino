@@ -5,30 +5,34 @@
 #define SS_PIN 10
 #define RST_PIN 9
 
-// ===== YOUR CARD UID =====
 String authorizedUID = "37 21 35 25";
+const char PATTERN[] = "..-";
 
-// ===== HARDWARE PINS =====
+const unsigned long TAP_WINDOW = 400;
+const unsigned long SYMBOL_GAP = 1000;
+const unsigned long PATTERN_END = 1500;
+
 const int RELAY_PIN = 7;
+const int BUZZER_PIN = 6;  // Buzzer pin
 
-// ===== SWIPE SETTINGS =====
-const unsigned long SWIPE_TIMEOUT = 2000;      // Max time between swipes
-const int PATTERN_LENGTH = 3;                   // Left-Right-Left
-
-// ===== SYSTEM VARIABLES =====
 bool doorUnlocked = false;
-int swipeCount = 0;
-unsigned long lastSwipeTime = 0;
-bool cardWasPresent = false;
+bool readingPattern = false;
+bool inSymbol = false;
 
-// LCD and RFID objects
+int tapCount = 0;
+unsigned long lastTapTime = 0;
+unsigned long symbolEndTime = 0;
+
+char morseBuffer[4];
+int symbolCount = 0;
+
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 MFRC522 rfid(SS_PIN, RST_PIN);
 
 void setup() {
   Serial.begin(9600);
-  
   pinMode(RELAY_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
   
   lcd.init();
@@ -36,194 +40,246 @@ void setup() {
   SPI.begin();
   rfid.PCD_Init();
   
-  // Welcome
-  lcd.setCursor(0, 0);
-  lcd.print("Swipe Pattern");
-  lcd.setCursor(0, 1);
-  lcd.print("Left-Right-Left");
-  delay(2500);
-  lcd.clear();
+  // Startup beep
+  beep(200, 2);
   
-  Serial.println("Ready - Swipe Left-Right-Left to toggle lock");
+  lcd.setCursor(0, 0);
+  lcd.print("Tap: ..-");
+  lcd.setCursor(0, 1);
+  lcd.print("1tap=. 2tap=-");
+  delay(3000);
+  lcd.clear();
 }
 
 void loop() {
-  updateDisplay();
+  bool cardDetected = rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial();
   
-  // Check for card
-  bool cardPresent = rfid.PICC_IsNewCardPresent();
-  
-  if (cardPresent) {
-    if (!rfid.PICC_ReadCardSerial()) {
-      return;
-    }
-    
-    String cardID = getCardID();
-    
-    // Check authorization
-    if (cardID != authorizedUID) {
-      handleWrongCard();
+  if (cardDetected) {
+    if (getCardID() != authorizedUID) {
       rfid.PICC_HaltA();
       return;
     }
-    
-    // Valid card - count this swipe
-    handleSwipe();
     rfid.PICC_HaltA();
+    handleTap();
   } else {
-    cardWasPresent = false;
+    checkGaps();
   }
   
-  // Check timeout
-  if (swipeCount > 0 && millis() - lastSwipeTime > SWIPE_TIMEOUT) {
-    swipeTimeout();
-  }
+  updateDisplay();
 }
 
-void handleSwipe() {
+void handleTap() {
   unsigned long now = millis();
   
-  // Reset if too much time passed
-  if (swipeCount > 0 && now - lastSwipeTime > SWIPE_TIMEOUT) {
-    swipeCount = 0;
-  }
-  
-  swipeCount++;
-  lastSwipeTime = now;
-  
-  // Show progress
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Swipe ");
-  lcd.print(swipeCount);
-  lcd.print("/");
-  lcd.print(PATTERN_LENGTH);
-  
-  // Check which swipe this should be
-  bool correctSwipe = false;
-  
-  if (swipeCount == 1) {
-    // Should be LEFT
-    lcd.setCursor(0, 1);
-    lcd.print("Left OK");
-    correctSwipe = true;
-  } else if (swipeCount == 2) {
-    // Should be RIGHT
-    lcd.setCursor(0, 1);
-    lcd.print("Right OK");
-    correctSwipe = true;
-  } else if (swipeCount == 3) {
-    // Should be LEFT
-    lcd.setCursor(0, 1);
-    lcd.print("Left OK!");
-    delay(300);
+  if (!readingPattern) {
+    readingPattern = true;
+    symbolCount = 0;
+    morseBuffer[0] = '\0';
+    tapCount = 1;
+    lastTapTime = now;
+    inSymbol = true;
     
-    // Pattern complete!
-    if (!doorUnlocked) {
-      unlockDoor();
-    } else {
-      lockDoor();
-    }
-    swipeCount = 0;
+    // Short beep on first tap
+    beep(100, 1);
+    
+    lcd.clear();
+    lcd.print("Tap 1...");
     return;
   }
   
-  if (correctSwipe) {
-    delay(300);
-    lcd.clear();
+  if (!inSymbol) {
+    inSymbol = true;
+    tapCount = 1;
+    lastTapTime = now;
+    
+    // Short beep on new symbol
+    beep(100, 1);
+    
     lcd.setCursor(0, 0);
-    lcd.print("Need ");
-    lcd.print(PATTERN_LENGTH - swipeCount);
-    lcd.print(" more...");
-    lcd.setCursor(0, 1);
-    if (swipeCount == 1) {
-      lcd.print("Next: Right");
-    } else if (swipeCount == 2) {
-      lcd.print("Next: Left");
+    lcd.print("Tap 1...");
+    return;
+  }
+  
+  if (now - lastTapTime < TAP_WINDOW) {
+    tapCount++;
+    lastTapTime = now;
+    
+    lcd.setCursor(0, 0);
+    lcd.print("Tap ");
+    lcd.print(tapCount);
+    lcd.print("...");
+    
+    if (tapCount > 2) {
+      // Error beep for too many taps
+      errorBeep();
+      
+      lcd.setCursor(0, 1);
+      lcd.print("Too many! Reset");
+      delay(1500);
+      resetPattern();
     }
   }
-  
-  Serial.print("Swipe ");
-  Serial.print(swipeCount);
-  Serial.println(" detected");
 }
 
-void swipeTimeout() {
+void checkGaps() {
+  if (!readingPattern) return;
+  
+  unsigned long now = millis();
+  
+  if (inSymbol && (now - lastTapTime > TAP_WINDOW)) {
+    inSymbol = false;
+    symbolEndTime = now;
+    
+    if (symbolCount >= 3) return;
+    
+    if (tapCount == 1) {
+      morseBuffer[symbolCount] = '.';
+      lcd.setCursor(0, 1);
+      lcd.print("= DOT (.)       ");
+    } else if (tapCount == 2) {
+      morseBuffer[symbolCount] = '-';
+      lcd.setCursor(0, 1);
+      lcd.print("= DASH (-)      ");
+    }
+    
+    symbolCount++;
+    morseBuffer[symbolCount] = '\0';
+    
+    lcd.setCursor(0, 0);
+    lcd.print("Code: ");
+    lcd.print(morseBuffer);
+    lcd.print("        ");
+    
+    tapCount = 0;
+  }
+  
+  if (!inSymbol && (now - symbolEndTime > PATTERN_END)) {
+    checkPattern();
+  }
+}
+
+void checkPattern() {
+  readingPattern = false;
+  
   lcd.clear();
   lcd.setCursor(0, 0);
-  lcd.print("Too slow!");
-  lcd.setCursor(0, 1);
-  lcd.print("Start over");
-  delay(1500);
-  swipeCount = 0;
-  lcd.clear();
+  lcd.print("Got: ");
+  lcd.print(morseBuffer);
+  
+  if (strcmp(morseBuffer, PATTERN) == 0) {
+    // Correct pattern - toggle lock
+    if (doorUnlocked) {
+      lockDoor();
+    } else {
+      unlockDoor();
+    }
+  } else {
+    // Wrong pattern - error beep
+    errorBeep();
+    
+    lcd.setCursor(0, 1);
+    lcd.print("Wrong! Use ..-");
+    delay(2000);
+  }
+  
+  resetPattern();
 }
 
-void updateDisplay() {
-  if (swipeCount > 0) return; // Don't overwrite swipe feedback
-  
-  if (doorUnlocked) {
-    lcd.setCursor(0, 0);
-    lcd.print("UNLOCKED        ");
-    lcd.setCursor(0, 1);
-    lcd.print("L-R-L to LOCK   ");
-  } else {
-    lcd.setCursor(0, 0);
-    lcd.print("LOCKED          ");
-    lcd.setCursor(0, 1);
-    lcd.print("L-R-L to OPEN   ");
-  }
+void resetPattern() {
+  symbolCount = 0;
+  morseBuffer[0] = '\0';
+  tapCount = 0;
+  inSymbol = false;
+  readingPattern = false;
 }
 
 void unlockDoor() {
   digitalWrite(RELAY_PIN, HIGH);
   doorUnlocked = true;
   
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("ACCESS GRANTED! ");
-  lcd.setCursor(0, 1);
-  lcd.print("Door UNLOCKED   ");
-  delay(2000);
-  lcd.clear();
+  // Success beep - door opening
+  successBeep();
   
-  Serial.println("*** DOOR UNLOCKED ***");
+  lcd.setCursor(0, 1);
+  lcd.print("UNLOCKED!");
+  delay(2000);
 }
 
 void lockDoor() {
   digitalWrite(RELAY_PIN, LOW);
   doorUnlocked = false;
   
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("LOCKED!         ");
-  lcd.setCursor(0, 1);
-  lcd.print("Goodbye         ");
-  delay(1500);
-  lcd.clear();
+  // Lock beep - door closing
+  lockBeep();
   
-  Serial.println("*** DOOR LOCKED ***");
+  lcd.setCursor(0, 1);
+  lcd.print("LOCKED!");
+  delay(1500);
 }
 
-void handleWrongCard() {
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("WRONG CARD      ");
-  lcd.setCursor(0, 1);
-  lcd.print("Access Denied   ");
-  delay(2000);
-  lcd.clear();
+// ===== BUZZER FUNCTIONS =====
+
+void beep(int duration, int count) {
+  for (int i = 0; i < count; i++) {
+    tone(BUZZER_PIN, 1000);
+    delay(duration);
+    noTone(BUZZER_PIN);
+    if (i < count - 1) delay(100);
+  }
+}
+
+void successBeep() {
+  // Happy ascending tone for unlock
+  tone(BUZZER_PIN, 523);  // C5
+  delay(150);
+  tone(BUZZER_PIN, 659);  // E5
+  delay(150);
+  tone(BUZZER_PIN, 784);  // G5
+  delay(300);
+  noTone(BUZZER_PIN);
+}
+
+void lockBeep() {
+  // Descending tone for lock
+  tone(BUZZER_PIN, 784);  // G5
+  delay(150);
+  tone(BUZZER_PIN, 659);  // E5
+  delay(150);
+  tone(BUZZER_PIN, 523);  // C5
+  delay(300);
+  noTone(BUZZER_PIN);
+}
+
+void errorBeep() {
+  // Low error beep for wrong pattern
+  tone(BUZZER_PIN, 200);  // Low tone
+  delay(300);
+  noTone(BUZZER_PIN);
+  delay(100);
+  tone(BUZZER_PIN, 200);
+  delay(300);
+  noTone(BUZZER_PIN);
+}
+
+void updateDisplay() {
+  if (readingPattern) return;
   
-  // Reset pattern on wrong card
-  swipeCount = 0;
+  lcd.setCursor(0, 0);
+  lcd.print("Use: ..-");
+  lcd.setCursor(0, 1);
+  if (doorUnlocked) {
+    lcd.print("UNLOCKED        ");
+  } else {
+    lcd.print("LOCKED          ");
+  }
 }
 
 String getCardID() {
   String ID = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
-    if (rfid.uid.uidByte[i] < 0x10) ID.concat("0");
-    ID.concat(String(rfid.uid.uidByte[i], HEX));
-    if (i < rfid.uid.size - 1) ID.concat(" ");
+    if (rfid.uid.uidByte[i] < 0x10) ID += "0";
+    ID += String(rfid.uid.uidByte[i], HEX);
+    if (i < rfid.uid.size - 1) ID += " ";
   }
   ID.toUpperCase();
   return ID;
