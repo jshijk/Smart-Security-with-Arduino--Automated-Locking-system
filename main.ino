@@ -4,7 +4,7 @@
 
 #define SS_PIN 10
 #define RST_PIN 9
-String UID = "37 21 25 25";  // Keep this format
+String UID = "37 21 35 25";  // Keep this format
 byte lock = 1;
 
 const int RELAY_PIN = 7;
